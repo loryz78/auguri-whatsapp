@@ -1,0 +1,28 @@
+name: Auguri automatici
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "Europe/Rome"
+
+  workflow_dispatch:
+
+jobs:
+  invio-auguri:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Sveglia Render
+        run: |
+          curl --retry 5 --retry-delay 20 --max-time 180 \
+          "${{ secrets.RENDER_URL }}/health"
+
+      - name: Attendi avvio applicazione
+        run: sleep 20
+
+      - name: Controlla compleanni e invia auguri
+        run: |
+          curl --fail --retry 3 --retry-delay 10 \
+          -X POST \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          "${{ secrets.RENDER_URL }}/cron/run"
