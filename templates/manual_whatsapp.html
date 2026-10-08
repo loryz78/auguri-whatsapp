@@ -1,0 +1,18 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Auguri per {{contact.name}}</title><link rel="stylesheet" href="{{url_for('static',filename='style.css')}}"></head><body>
+<header><div><h1>🎂 Auguri WhatsApp</h1><span>V3.4 · Invio manuale assistito</span></div><a class="ghost" href="{{url_for('index')}}">Torna alla dashboard</a></header>
+<main><div class="panel" style="max-width:720px;margin:auto"><h2>Auguri per {{contact.name}}</h2>
+<p>Categoria: <b>{{contact.category}}</b> · Frase casuale: <b>{{template.label}}</b></p>
+<p>Puoi modificare il messaggio prima di aprire WhatsApp.</p>
+<textarea id="msg" rows="7" style="width:100%">{{message}}</textarea>
+<p><button type="button" class="primary" onclick="openWhatsapp()">Apri WhatsApp con il messaggio</button></p>
+<p class="muted">Si aprirà WhatsApp con il testo compilato. Premi tu <b>Invia</b> nella chat. Nessun invio automatico o registrazione come inviato.</p>
+</div></main>
+<script>
+function openWhatsapp(){
+ const phone={{phone|tojson}};
+ const msg=document.getElementById('msg').value.trim();
+ if(!/^\d{7,15}$/.test(phone)){alert('Controlla il numero con prefisso internazionale.');return;}
+ if(!msg){alert('Scrivi un messaggio.');return;}
+ window.open('https://wa.me/'+phone+'?text='+encodeURIComponent(msg),'_blank','noopener,noreferrer');
+}
+</script></body></html>
