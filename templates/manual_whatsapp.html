@@ -9,7 +9,7 @@
 </div></main>
 <script>
 function openWhatsapp(){
- const phone={{phone|tojson}};
+ const phone=String({{phone|tojson}}).replace(/\D/g, "");
  const msg=document.getElementById('msg').value.trim();
  if(!/^\d{7,15}$/.test(phone)){alert('Controlla il numero con prefisso internazionale.');return;}
  if(!msg){alert('Scrivi un messaggio.');return;}
