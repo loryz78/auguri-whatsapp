@@ -198,13 +198,25 @@ def already_sent_today(contact_id: int) -> bool:
     return bool(row)
 
 
-def choose_template(category: str):
+def choose_template(category: str, contact_id=None):
     con = get_db()
     rows = con.execute('SELECT * FROM templates WHERE enabled=1 AND category=? ORDER BY id', (category,)).fetchall()
     if not rows:
         rows = con.execute("SELECT * FROM templates WHERE enabled=1 AND category='Generale' ORDER BY id").fetchall()
     if not rows:
         rows = con.execute('SELECT * FROM templates WHERE enabled=1 ORDER BY id').fetchall()
+    # Exclude last year's confirmed birthday greeting for this volunteer.
+    # Only OK (API) and MANUALE (user confirmed) count as sent.
+    if contact_id is not None and len(rows) > 1:
+        last_year = str(datetime.now(ZoneInfo('Europe/Rome')).year - 1)
+        previous = con.execute("""SELECT template_id FROM sent_log
+            WHERE contact_id=? AND substr(sent_at,1,4)=?
+              AND status IN ('OK','MANUALE') AND template_id IS NOT NULL
+            ORDER BY sent_at DESC, id DESC LIMIT 1""", (contact_id, last_year)).fetchone()
+        if previous:
+            alternatives = [r for r in rows if r['id'] != previous['template_id']]
+            if alternatives:
+                rows = alternatives
     con.close()
     return random.choice(rows) if rows else None
 
@@ -276,7 +288,7 @@ def process_birthdays(force=False, automatic_only=False):
         if already_sent_today(contact['id']) and not force:
             results.append((contact['name'], 'GIÀ INVIATO'))
             continue
-        template = choose_template(contact['category'])
+        template = choose_template(contact['category'], contact['id'])
         if not template:
             results.append((contact['name'], 'NESSUN TEMPLATE'))
             continue
@@ -390,6 +402,49 @@ def templates_add():
     con.commit(); con.close(); flash('Template aggiunto.','ok'); return redirect(url_for('index'))
 
 
+@app.post('/templates/import')
+@login_required
+def templates_import():
+    upload = request.files.get('file')
+    if not upload or not upload.filename.lower().endswith('.csv'):
+        flash('Seleziona il file CSV dei template.', 'error')
+        return redirect(url_for('index'))
+    try:
+        rows = list(csv.DictReader(io.StringIO(upload.read().decode('utf-8-sig'))))
+        required = {'label', 'category', 'template_name', 'language', 'preview_text'}
+        if not rows or not required.issubset(rows[0]):
+            raise ValueError('Intestazioni CSV mancanti o file vuoto')
+        if len(rows) > 500:
+            raise ValueError('Massimo 500 template per importazione')
+        clean = []
+        for r in rows:
+            label = (r.get('label') or '').strip()
+            category = (r.get('category') or 'Generale').strip() or 'Generale'
+            name = (r.get('template_name') or '').strip()
+            lang = (r.get('language') or 'it').strip() or 'it'
+            preview = (r.get('preview_text') or '').strip()
+            if not label or not name or not preview or len(preview)>4000:
+                raise ValueError('Riga con nome, identificativo o testo non valido')
+            clean.append((label,category,name,lang,preview))
+        con=get_db()
+        try:
+            added=0; skipped=0
+            for label,category,name,lang,preview in clean:
+                exists=con.execute('SELECT 1 FROM templates WHERE template_name=? AND language=? LIMIT 1',(name,lang)).fetchone()
+                if exists:
+                    skipped+=1; continue
+                con.execute('INSERT INTO templates(label,category,template_name,language,preview_text) VALUES(?,?,?,?,?)',
+                            (label,category,name,lang,preview))
+                added+=1
+            con.commit()
+        finally:
+            con.close()
+        flash(f'Template importati: {added}. Già presenti: {skipped}.', 'ok')
+    except Exception as exc:
+        flash(f'Importazione template non riuscita: {exc}', 'error')
+    return redirect(url_for('index'))
+
+
 @app.post('/templates/<int:tid>/toggle')
 @login_required
 def templates_toggle(tid):
@@ -419,7 +474,7 @@ def manual_whatsapp(cid):
     if not contact:
         flash('Contatto non trovato.', 'error')
         return redirect(url_for('index'))
-    template = choose_template(contact['category'])
+    template = choose_template(contact['category'], contact['id'])
     if not template:
         flash('Nessuna frase attiva disponibile.', 'error')
         return redirect(url_for('index'))
@@ -463,7 +518,7 @@ def confirm_manual_whatsapp(cid):
 def send_one(cid):
     con=get_db(); c=con.execute('SELECT * FROM contacts WHERE id=?',(cid,)).fetchone(); con.close()
     if not c: flash('Contatto non trovato.','error'); return redirect(url_for('index'))
-    t=choose_template(c['category'])
+    t=choose_template(c['category'], c['id'])
     if not t: flash('Nessun template attivo disponibile.','error'); return redirect(url_for('index'))
     rendered=render_preview(t['preview_text'], c)
     try:
@@ -560,7 +615,7 @@ def simulate():
     """Read-only dry run; never calls Meta and never writes to the send log."""
     rows=[]
     for contact in due_contacts():
-        template=choose_template(contact['category'])
+        template=choose_template(contact['category'], contact['id'])
         rows.append({'contact':contact['name'], 'category':contact['category'],
                      'template':template['template_name'] if template else None,
                      'preview':render_preview(template['preview_text'],contact) if template else None,
