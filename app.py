@@ -13,6 +13,7 @@ try:
 except ImportError:
     psycopg = None
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from functools import wraps
 from pathlib import Path
 
@@ -471,6 +472,22 @@ def backup_db():
     return send_file(target,as_attachment=True,download_name=target.name)
 
 
+@app.post('/simulate')
+@login_required
+def simulate():
+    """Read-only dry run; never calls Meta and never writes to the send log."""
+    rows=[]
+    for contact in due_contacts():
+        template=choose_template(contact['category'])
+        rows.append({'contact':contact['name'], 'category':contact['category'],
+                     'template':template['template_name'] if template else None,
+                     'preview':render_preview(template['preview_text'],contact) if template else None,
+                     'already_sent':already_sent_today(contact['id'])})
+    return {'simulation':True,'whatsapp_called':False,'records_written':False,
+            'date_italy':datetime.now(ZoneInfo('Europe/Rome')).date().isoformat(),
+            'results':rows}
+
+
 @app.get('/health')
 def health():
     return {'ok': True, 'time': datetime.now().isoformat(timespec='seconds')}
@@ -482,10 +499,10 @@ def cron_http():
     if not secret or request.headers.get('X-Cron-Secret') != secret:
         return {'ok': False, 'error': 'unauthorized'}, 401
     if setting('auto_send','1')!='1': return {'ok':True,'skipped':'auto_send disabled'}
-    now=datetime.now(); hh=int(setting('send_hour','09')); mm=int(setting('send_minute','00'))
+    now=datetime.now(ZoneInfo('Europe/Rome')); hh=int(setting('send_hour','09')); mm=int(setting('send_minute','00'))
     # Permette una finestra di 15 minuti: ideale se il cron gira ogni 5 minuti.
     current=now.hour*60+now.minute; target=hh*60+mm
-    if not (target <= current <= target+14): return {'ok':True,'skipped':'outside send window'}
+    if not (target <= current <= target+14): return {'ok':True,'skipped':'outside_send_window','italy_time':now.strftime('%H:%M'),'scheduled_time':f'{hh:02d}:{mm:02d}'}
     return {'ok':True,'results':process_birthdays(force=False)}
 
 
