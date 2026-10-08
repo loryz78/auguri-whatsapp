@@ -1,11 +1,21 @@
 <!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Auguri per {{contact.name}}</title><link rel="stylesheet" href="{{url_for('static',filename='style.css')}}"></head><body>
-<header><div><h1>🎂 Auguri WhatsApp</h1><span>V3.4 · Invio manuale assistito</span></div><a class="ghost" href="{{url_for('index')}}">Torna alla dashboard</a></header>
+<header><div><h1>🎂 Auguri WhatsApp</h1><span>V3.5 · Invio manuale assistito</span></div><a class="ghost" href="{{url_for('index')}}">Torna alla dashboard</a></header>
 <main><div class="panel" style="max-width:720px;margin:auto"><h2>Auguri per {{contact.name}}</h2>
 <p>Categoria: <b>{{contact.category}}</b> · Frase casuale: <b>{{template.label}}</b></p>
 <p>Puoi modificare il messaggio prima di aprire WhatsApp.</p>
-<textarea id="msg" rows="7" style="width:100%">{{message}}</textarea>
+<form id="confirmForm" method="post" action="{{url_for('confirm_manual_whatsapp',cid=contact.id)}}">
+<input type="hidden" name="csrf" value="{{csrf}}">
+<input type="hidden" name="template_id" value="{{template.id}}">
+<textarea id="msg" name="message" maxlength="4000" rows="7" style="width:100%">{{message}}</textarea>
+</form>
 <p><button type="button" class="primary" onclick="openWhatsapp()">Apri WhatsApp con il messaggio</button></p>
-<p class="muted">Si aprirà WhatsApp con il testo compilato. Premi tu <b>Invia</b> nella chat. Nessun invio automatico o registrazione come inviato.</p>
+<p class="muted">1. Apri WhatsApp. 2. Premi <b>Invia</b> nella chat. 3. Torna qui e conferma solo dopo aver effettivamente inviato.</p>
+{% if already_recorded %}
+<p><strong>Un invio è già registrato oggi per questo contatto.</strong></p>
+{% else %}
+<button type="submit" form="confirmForm" onclick="return confirm('Hai davvero premuto INVIA in WhatsApp? Questa azione registra il messaggio come inviato manualmente.')">✓ Conferma invio effettuato</button>
+{% endif %}
+<p class="muted">La conferma è una dichiarazione manuale, non verifica la consegna su WhatsApp. Evita un secondo invio automatico nello stesso giorno.</p>
 </div></main>
 <script>
 function openWhatsapp(){
