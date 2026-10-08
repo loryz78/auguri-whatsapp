@@ -395,6 +395,24 @@ def templates_edit(tid):
     con.commit(); con.close(); flash('Template aggiornato.','ok'); return redirect(url_for('index'))
 
 
+@app.get('/manual/<int:cid>')
+@login_required
+def manual_whatsapp(cid):
+    con = get_db()
+    contact = con.execute('SELECT * FROM contacts WHERE id=?', (cid,)).fetchone()
+    con.close()
+    if not contact:
+        flash('Contatto non trovato.', 'error')
+        return redirect(url_for('index'))
+    template = choose_template(contact['category'])
+    if not template:
+        flash('Nessuna frase attiva disponibile.', 'error')
+        return redirect(url_for('index'))
+    return render_template('manual_whatsapp.html', contact=contact, template=template,
+                           message=render_preview(template['preview_text'], contact),
+                           phone=normalize_phone(contact['phone']))
+
+
 @app.post('/send/<int:cid>')
 @login_required
 def send_one(cid):
