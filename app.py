@@ -96,6 +96,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sent_log (id INTEGER PRIMARY KEY AUTOINCREMENT,contact_id INTEGER,template_id INTEGER,recipient_name TEXT NOT NULL,phone TEXT NOT NULL,template_name TEXT NOT NULL,rendered_text TEXT NOT NULL,sent_at TEXT NOT NULL,status TEXT NOT NULL,provider_message_id TEXT DEFAULT '',response_excerpt TEXT DEFAULT '',FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE SET NULL,FOREIGN KEY(template_id) REFERENCES templates(id) ON DELETE SET NULL);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
         """)
+    # Additive migration: existing Neon and SQLite contacts remain untouched.
+    if using_postgres():
+        con.execute('ALTER TABLE contacts ADD COLUMN IF NOT EXISTS auto_birthday INTEGER NOT NULL DEFAULT 0')
+    else:
+        cols = [r['name'] for r in con.execute('PRAGMA table_info(contacts)').fetchall()]
+        if 'auto_birthday' not in cols:
+            con.execute('ALTER TABLE contacts ADD COLUMN auto_birthday INTEGER NOT NULL DEFAULT 0')
     defaults={'send_hour':'09','send_minute':'00','auto_send':'1','default_country':'+39','admin_password_hash':'','app_title':'Auguri WhatsApp'}
     for k,v in defaults.items():
         con.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',(k,v))
@@ -161,9 +168,9 @@ def age_today(birth_date: str):
         return ''
 
 
-def due_contacts():
+def due_contacts(automatic_only=False):
     con = get_db()
-    rows = con.execute('SELECT * FROM contacts WHERE enabled=1 ORDER BY name').fetchall()
+    rows = con.execute('SELECT * FROM contacts WHERE enabled=1' + (' AND auto_birthday=1' if automatic_only else '') + ' ORDER BY name').fetchall()
     con.close()
     return [r for r in rows if birthday_today(r['birth_date'])]
 
@@ -248,9 +255,9 @@ def log_send(contact, template_row, rendered_text: str, status: str, provider_me
     con.commit(); con.close()
 
 
-def process_birthdays(force=False):
+def process_birthdays(force=False, automatic_only=False):
     results = []
-    for contact in due_contacts():
+    for contact in due_contacts(automatic_only=automatic_only):
         if already_sent_today(contact['id']) and not force:
             results.append((contact['name'], 'GIÀ INVIATO'))
             continue
@@ -310,7 +317,8 @@ def index():
       'sent_month': sum(1 for l in logs if l['status']=='OK' and l['sent_at'].startswith(datetime.now().strftime('%Y-%m'))),
     }
     sets = {k: setting(k) for k in ['send_hour','send_minute','auto_send','default_country','app_title']}
-    return render_template('index.html', contacts=contacts, templates=templates, logs=logs, categories=categories, due=due, age_today=age_today, stats=stats, settings=sets, whatsapp_ready=bool(cfg['token'] and cfg['phone_number_id']), api_version=cfg['api_version'])
+    upcoming = sorted(contacts, key=lambda c: ((date(date.today().year, int(c['birth_date'][5:7]), min(int(c['birth_date'][8:10]), 28)) - date.today()).days % 365) if len(c['birth_date']) >= 10 else 999)[:10]
+    return render_template('index.html', upcoming=upcoming, contacts=contacts, templates=templates, logs=logs, categories=categories, due=due, age_today=age_today, stats=stats, settings=sets, whatsapp_ready=bool(cfg['token'] and cfg['phone_number_id']), api_version=cfg['api_version'])
 
 
 @app.post('/contacts/add')
@@ -319,8 +327,8 @@ def contacts_add():
     f = request.form
     if not f.get('name') or not f.get('phone') or not f.get('birth_date'):
         flash('Nome, telefono e data di nascita sono obbligatori.', 'error'); return redirect(url_for('index'))
-    con=get_db(); con.execute('INSERT INTO contacts(name,phone,birth_date,category,notes) VALUES(?,?,?,?,?)',
-      (f['name'].strip(), normalize_phone(f['phone']), f['birth_date'], f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip()))
+    con=get_db(); con.execute('INSERT INTO contacts(name,phone,birth_date,category,notes,auto_birthday) VALUES(?,?,?,?,?,?)',
+      (f['name'].strip(), normalize_phone(f['phone']), f['birth_date'], f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip(),1 if f.get('auto_birthday') else 0))
     con.commit(); con.close(); flash('Contatto aggiunto.', 'ok'); return redirect(url_for('index'))
 
 
@@ -328,6 +336,16 @@ def contacts_add():
 @login_required
 def contacts_toggle(cid):
     con=get_db(); con.execute('UPDATE contacts SET enabled=1-enabled WHERE id=?',(cid,)); con.commit(); con.close(); return redirect(url_for('index'))
+
+
+@app.post('/contacts/<int:cid>/auto-toggle')
+@login_required
+def contacts_auto_toggle(cid):
+    con=get_db()
+    con.execute('UPDATE contacts SET auto_birthday=1-auto_birthday WHERE id=?',(cid,))
+    con.commit(); con.close()
+    flash('Preferenza invio automatico aggiornata.', 'ok')
+    return redirect(url_for('index'))
 
 
 @app.post('/contacts/<int:cid>/delete')
@@ -341,6 +359,7 @@ def contacts_delete(cid):
 def contacts_edit(cid):
     f=request.form; con=get_db(); con.execute('UPDATE contacts SET name=?,phone=?,birth_date=?,category=?,notes=? WHERE id=?',
       (f['name'].strip(), normalize_phone(f['phone']), f['birth_date'], f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip(), cid))
+    con.execute('UPDATE contacts SET auto_birthday=? WHERE id=?',(1 if f.get('auto_birthday') else 0,cid))
     con.commit(); con.close(); flash('Contatto aggiornato.','ok'); return redirect(url_for('index'))
 
 
@@ -438,7 +457,7 @@ def import_contacts():
             bd=str(bd).strip()
             cat=str(r.get('categoria') or r.get('category') or 'Generale').strip() or 'Generale'; notes=str(r.get('note') or r.get('notes') or '').strip()
             if name and phone and bd:
-                con.execute('INSERT INTO contacts(name,phone,birth_date,category,notes) VALUES(?,?,?,?,?)',(name,normalize_phone(phone),bd,cat,notes)); count+=1
+                con.execute('INSERT INTO contacts(name,phone,birth_date,category,notes,auto_birthday) VALUES(?,?,?,?,?,?)',(name,normalize_phone(phone),bd,cat,notes, 1 if str(r.get('invio_automatico') or '').strip().lower() in ('1','si','sì','true','yes') else 0)); count+=1
         con.commit(); con.close(); flash(f'Importati {count} contatti.','ok')
     except Exception as exc: flash(f'Importazione fallita: {exc}','error')
     return redirect(url_for('index'))
@@ -447,7 +466,7 @@ def import_contacts():
 @app.get('/export.xlsx')
 @login_required
 def export_contacts():
-    con=get_db(); rows=con.execute('SELECT name,phone,birth_date,category,notes,enabled FROM contacts ORDER BY name').fetchall(); con.close()
+    con=get_db(); rows=con.execute('SELECT name,phone,birth_date,category,notes,enabled,auto_birthday FROM contacts ORDER BY name').fetchall(); con.close()
     wb=Workbook(); ws=wb.active; ws.title='Contatti'; ws.append(['nome','telefono','data_nascita','categoria','note','attivo'])
     for r in rows: ws.append([r[k] for k in ['name','phone','birth_date','category','notes','enabled']])
     bio=io.BytesIO(); wb.save(bio); bio.seek(0)
@@ -482,7 +501,7 @@ def simulate():
         rows.append({'contact':contact['name'], 'category':contact['category'],
                      'template':template['template_name'] if template else None,
                      'preview':render_preview(template['preview_text'],contact) if template else None,
-                     'already_sent':already_sent_today(contact['id'])})
+                     'already_sent':already_sent_today(contact['id']), 'automatic_enabled':bool(contact['auto_birthday'])})
     return {'simulation':True,'whatsapp_called':False,'records_written':False,
             'date_italy':datetime.now(ZoneInfo('Europe/Rome')).date().isoformat(),
             'results':rows}
@@ -503,7 +522,7 @@ def cron_http():
     # Permette una finestra di 15 minuti: ideale se il cron gira ogni 5 minuti.
     current=now.hour*60+now.minute; target=hh*60+mm
     if not (target <= current <= target+14): return {'ok':True,'skipped':'outside_send_window','italy_time':now.strftime('%H:%M'),'scheduled_time':f'{hh:02d}:{mm:02d}'}
-    return {'ok':True,'results':process_birthdays(force=False)}
+    return {'ok':True,'results':process_birthdays(force=False, automatic_only=True)}
 
 
 init_db()
