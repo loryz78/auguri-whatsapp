@@ -150,6 +150,21 @@ def admin_password_hash() -> str:
     return ''
 
 
+def date_it(value):
+    if not value: return ''
+    value = str(value)
+    try:
+        return datetime.strptime(value[:10], '%Y-%m-%d').strftime('%d/%m/%Y') + value[10:]
+    except ValueError:
+        return value
+
+def date_iso(value):
+    value = str(value or '').strip()
+    for fmt in ('%d/%m/%Y', '%Y-%m-%d'):
+        try: return datetime.strptime(value, fmt).strftime('%Y-%m-%d')
+        except ValueError: pass
+    raise ValueError('Data non valida: usare GG/MM/AAAA')
+
 def birthday_today(birth_date: str) -> bool:
     try:
         dt = datetime.strptime(birth_date, '%Y-%m-%d')
@@ -178,7 +193,7 @@ def due_contacts(automatic_only=False):
 def already_sent_today(contact_id: int) -> bool:
     today = datetime.now().strftime('%Y-%m-%d')
     con = get_db()
-    row = con.execute("SELECT 1 FROM sent_log WHERE contact_id=? AND substr(sent_at,1,10)=? AND status='OK' LIMIT 1", (contact_id, today)).fetchone()
+    row = con.execute("SELECT 1 FROM sent_log WHERE contact_id=? AND substr(sent_at,1,10)=? AND status IN ('OK','MANUALE') LIMIT 1", (contact_id, today)).fetchone()
     con.close()
     return bool(row)
 
@@ -314,11 +329,11 @@ def index():
       'today': len(due),
       'contacts': len(contacts),
       'templates': len(templates),
-      'sent_month': sum(1 for l in logs if l['status']=='OK' and l['sent_at'].startswith(datetime.now().strftime('%Y-%m'))),
+      'sent_month': sum(1 for l in logs if l['status'] in ('OK','MANUALE') and l['sent_at'].startswith(datetime.now().strftime('%Y-%m'))),
     }
     sets = {k: setting(k) for k in ['send_hour','send_minute','auto_send','default_country','app_title']}
     upcoming = sorted(contacts, key=lambda c: ((date(date.today().year, int(c['birth_date'][5:7]), min(int(c['birth_date'][8:10]), 28)) - date.today()).days % 365) if len(c['birth_date']) >= 10 else 999)[:10]
-    return render_template('index.html', upcoming=upcoming, contacts=contacts, templates=templates, logs=logs, categories=categories, due=due, age_today=age_today, stats=stats, settings=sets, whatsapp_ready=bool(cfg['token'] and cfg['phone_number_id']), api_version=cfg['api_version'])
+    return render_template('index.html', date_it=date_it, upcoming=upcoming, contacts=contacts, templates=templates, logs=logs, categories=categories, due=due, age_today=age_today, stats=stats, settings=sets, whatsapp_ready=bool(cfg['token'] and cfg['phone_number_id']), api_version=cfg['api_version'])
 
 
 @app.post('/contacts/add')
@@ -328,7 +343,7 @@ def contacts_add():
     if not f.get('name') or not f.get('phone') or not f.get('birth_date'):
         flash('Nome, telefono e data di nascita sono obbligatori.', 'error'); return redirect(url_for('index'))
     con=get_db(); con.execute('INSERT INTO contacts(name,phone,birth_date,category,notes,auto_birthday) VALUES(?,?,?,?,?,?)',
-      (f['name'].strip(), normalize_phone(f['phone']), f['birth_date'], f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip(),1 if f.get('auto_birthday') else 0))
+      (f['name'].strip(), normalize_phone(f['phone']), date_iso(f['birth_date']), f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip(),1 if f.get('auto_birthday') else 0))
     con.commit(); con.close(); flash('Contatto aggiunto.', 'ok'); return redirect(url_for('index'))
 
 
@@ -358,7 +373,7 @@ def contacts_delete(cid):
 @login_required
 def contacts_edit(cid):
     f=request.form; con=get_db(); con.execute('UPDATE contacts SET name=?,phone=?,birth_date=?,category=?,notes=? WHERE id=?',
-      (f['name'].strip(), normalize_phone(f['phone']), f['birth_date'], f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip(), cid))
+      (f['name'].strip(), normalize_phone(f['phone']), date_iso(f['birth_date']), f.get('category','Generale').strip() or 'Generale', f.get('notes','').strip(), cid))
     con.execute('UPDATE contacts SET auto_birthday=? WHERE id=?',(1 if f.get('auto_birthday') else 0,cid))
     con.commit(); con.close(); flash('Contatto aggiornato.','ok'); return redirect(url_for('index'))
 
@@ -408,9 +423,39 @@ def manual_whatsapp(cid):
     if not template:
         flash('Nessuna frase attiva disponibile.', 'error')
         return redirect(url_for('index'))
+    session['manual_csrf'] = secrets.token_urlsafe(32)
     return render_template('manual_whatsapp.html', contact=contact, template=template,
                            message=render_preview(template['preview_text'], contact),
-                           phone=normalize_phone(contact['phone']))
+                           phone=normalize_phone(contact['phone']),
+                           csrf=session['manual_csrf'],
+                           already_recorded=already_sent_today(cid))
+
+
+@app.post('/manual/<int:cid>/confirm')
+@login_required
+def confirm_manual_whatsapp(cid):
+    if not secrets.compare_digest(str(session.get('manual_csrf', '')), str(request.form.get('csrf', ''))) or not session.get('manual_csrf'):
+        flash('Sessione scaduta. Riapri la scheda WhatsApp.', 'error')
+        return redirect(url_for('manual_whatsapp', cid=cid))
+    session.pop('manual_csrf', None)
+    con = get_db()
+    contact = con.execute('SELECT * FROM contacts WHERE id=?', (cid,)).fetchone()
+    template_id = request.form.get('template_id', type=int)
+    template = con.execute('SELECT * FROM templates WHERE id=?', (template_id,)).fetchone() if template_id else None
+    con.close()
+    if not contact:
+        flash('Contatto non trovato.', 'error')
+        return redirect(url_for('index'))
+    if already_sent_today(cid):
+        flash('Auguri già registrati oggi per questo contatto. Nessun duplicato creato.', 'info')
+        return redirect(url_for('index'))
+    message = request.form.get('message', '').strip()
+    if not message or len(message) > 4000:
+        flash('Il messaggio deve contenere da 1 a 4000 caratteri.', 'error')
+        return redirect(url_for('manual_whatsapp', cid=cid))
+    log_send(contact, template, message, 'MANUALE', '', 'Invio dichiarato dall’utente, non verificato da WhatsApp')
+    flash('Invio manuale registrato nello storico. Non è una conferma di consegna WhatsApp.', 'ok')
+    return redirect(url_for('index'))
 
 
 @app.post('/send/<int:cid>')
